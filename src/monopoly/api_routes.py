@@ -1,11 +1,8 @@
 import uuid
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
-
-# Import the shared state instance
 from .connection import room_manager
 
-# Create the router object
 router = APIRouter(prefix="/api/rooms", tags=["Rooms"])
 
 
@@ -15,30 +12,35 @@ class JoinRoomRequest(BaseModel):
 
 @router.post("/create", status_code=status.HTTP_201_CREATED)
 async def create_room():
-    room_id = str(uuid.uuid4())[:8]
-
-    # Access the shared room manager to register the room
-    room_manager.rooms[room_id] = {
-        "status": "waiting",
-        "board_state": {},
-    }
-
-    return {
-        "success": True,
-        "room_id": room_id,
-        "message": "Room initialized successfully.",
-    }
+    # Retry on the extremely unlikely chance of a short-code collision.
+    for _ in range(5):
+        room_id = uuid.uuid4().hex[:8]
+        if room_manager.get_room(room_id) is None:
+            room_manager.create_room(room_id)
+            return {
+                "success": True,
+                "room_id": room_id,
+                "message": "Room initialized successfully.",
+            }
+    raise HTTPException(status_code=503, detail="Could not allocate a room code.")
 
 
 @router.post("/join")
 async def join_room(payload: JoinRoomRequest):
     room_id = payload.room_code.strip().lower()
-
-    # Access the shared room manager to validate the code
-    if room_id not in room_manager.rooms:
+    room = room_manager.get_room(room_id)
+    if room is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="The requested game room code does not exist.",
         )
-
-    return {"success": True, "room_id": room_id, "message": "Access granted to room."}
+    if room.status != "waiting":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The game has already started.",
+        )
+    return {
+        "success": True,
+        "room_id": room_id,
+        "message": "Room found. Connect over WebSocket to join.",
+    }

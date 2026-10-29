@@ -1,77 +1,123 @@
-import asyncio
-import uuid
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from typing import Dict, Optional
-from pydantic import BaseModel
-
+from typing import Optional
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, ValidationError
 from .connection import room_manager
+from .main_game import Game
 
 
-# Schema for incoming game actions
 class GameAction(BaseModel):
-    action: str  # e.g., "ROLL_DICE", "BUY_PROPERTY", "END_TURN"
+    action: str
     data: Optional[dict] = None
 
 
 router = APIRouter(tags=["WebSocket"])
 
 
-@router.websocket("/ws/{room_id}")
-async def game_websocket_endpoint(websocket: WebSocket, room_id: str):
-    player_id = await room_manager.connect(room_id, websocket)
+async def send_error(websocket: WebSocket, message: str):
+    await websocket.send_json({"type": "ERROR", "message": message})
 
-    # Broadcast to room that a new opponent entered
+
+@router.websocket("/ws/{room_id}")
+async def game_websocket_endpoint(
+    websocket: WebSocket,
+    room_id: str,
+    name: str = Query(...),
+):
+    try:
+        player_id, role = await room_manager.connect(room_id, name, websocket)
+    except ValueError as exc:
+        await websocket.close(code=1008, reason=str(exc))
+        return
+
+    room = room_manager.get_room(room_id)
+    client = room.connections[player_id]
+    await websocket.send_json(
+        {
+            "type": "WELCOME",
+            "room_id": room_id,
+            "player_id": player_id,
+            "player_name": client.name,
+            "role": role,
+            "status": room.status,
+        }
+    )
     await room_manager.broadcast_to_room(
         room_id,
         {
             "type": "PLAYER_JOINED",
             "player_id": player_id,
-            "message": f"Player {player_id} entered the game.",
+            "player_name": client.name,
+            "role": role,
         },
     )
 
     try:
         while True:
-            # Receive structured data from client
             raw_data = await websocket.receive_json()
+            try:
+                packet = GameAction(**raw_data)
+            except (ValidationError, TypeError) as exc:
+                await send_error(websocket, f"Invalid action message: {exc}")
+                continue
 
-            # (Optional) Validate using Pydantic if desired
-            action_packet = GameAction(**raw_data)
+            # Re-fetch shared room/client state on each message.
+            room = room_manager.get_room(room_id)
+            if room is None or player_id not in room.connections:
+                await send_error(websocket, "This room is no longer available.")
+                break
+            client = room.connections[player_id]
+            action = packet.action.strip().upper()
 
-            # Handle turn-based Monopoly mechanics
-            if action_packet.action == "ROLL_DICE":
-                # In production, process your Monopoly state engine here
-                import random
-
-                die1, die2 = random.randint(1, 6), random.randint(1, 6)
-
+            if action == "START_GAME":
+                if client.role != "host":
+                    await send_error(websocket, "Only the host can start the game.")
+                    continue
+                if room.status != "waiting":
+                    await send_error(websocket, "The game has already started.")
+                    continue
+                names = [c.name for c in room.connections.values()]
+                if len(names) < 2:
+                    await send_error(
+                        websocket, "At least two players must join before starting."
+                    )
+                    continue
+                try:
+                    room.game = Game(names)
+                except ValueError as exc:
+                    await send_error(websocket, str(exc))
+                    continue
+                room.status = "playing"
                 await room_manager.broadcast_to_room(
                     room_id,
                     {
-                        "type": "DICE_ROLLED",
-                        "player_id": player_id,
-                        "rolls": [die1, die2],
-                        "total": die1 + die2,
+                        "type": "GAME_STARTED",
+                        "state": room.game.to_dict(),
                     },
                 )
+                continue
 
-            elif action_packet.action == "END_TURN":
-                await room_manager.broadcast_to_room(
-                    room_id,
-                    {
-                        "type": "TURN_CHANGED",
-                        "previous_player": player_id,
-                        "message": "Next player's turn!",
-                    },
-                )
+            if room.status != "playing" or room.game is None:
+                await send_error(websocket, "The host must start the game first.")
+                continue
+
+            try:
+                events = room.game.handle_action(client.name, action, packet.data)
+            except ValueError as exc:
+                await send_error(websocket, str(exc))
+                continue
+
+            for event in events:
+                await room_manager.broadcast_to_room(room_id, event)
 
     except WebSocketDisconnect:
+        pass
+    finally:
         room_manager.disconnect(room_id, player_id)
         await room_manager.broadcast_to_room(
             room_id,
             {
                 "type": "PLAYER_LEFT",
                 "player_id": player_id,
-                "message": f"Player {player_id} disconnected.",
+                "player_name": client.name,
             },
         )

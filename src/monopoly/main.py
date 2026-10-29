@@ -1,26 +1,32 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Import your route files
-from . import api_routes
-from . import websocket
+from monopoly.api_routes import router as rooms_router
+from monopoly.websocket import router as websocket_router
 
-app = FastAPI(title="Monopoly Game Server")
-
-# Configure CORS for your decoupled frontend
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:5500",
-]
+app = FastAPI(
+    title="Monopoly WebSocket API",
+    description="Room management and real-time Monopoly game actions.",
+    version="1.0.0",
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Connect the routers to your main application instance
-app.include_router(api_routes.router)
-app.include_router(websocket.router)
+app.include_router(rooms_router)
+app.include_router(websocket_router)
+
+
+@app.get("/")
+async def root():
+    return {"message": "Monopoly WebSocket API is running."}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}

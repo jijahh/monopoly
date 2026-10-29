@@ -1,4 +1,4 @@
-from .properties import *
+from monopoly.properties import *
 
 
 class Player:
@@ -8,7 +8,7 @@ class Player:
         self.position = 0
         self.owned_cities = []
         self.owned_airport = []
-        self.owned_utitilities = []
+        self.owned_utilities = []
         self.owned_properties = []
         self.houses = 0
         self.hotels = 0
@@ -16,65 +16,47 @@ class Player:
         self.in_prison = 0
         self.on_vacation = 0
         self.pardons = 0
-        self.can_end = False
-        self.can_roll = True
+        self.has_rolled = False
 
-    def move(self):
-        if self.on_vacation or self.in_prison:
-            self.can_roll = False
-        if self.on_vacation:
-            self.on_vacation -= 1
-        if self.in_prison:
-            choice = self.pay_bail()
-            if choice:
-                return "end_turn"
-            else:
-                return "roll_out_of_prison"
-        choice = (
-            input("What is your move? (roll_dice, end_turn, upgrade_property): ")
-            .strip()
-            .lower()
-        )
-        if choice == "upgrade_property":
-            pass
-        elif choice == "end_turn":
-            if self.can_end:
-                self.can_end = False
-                self.can_roll = True
-                return choice
-            else:
-                print("Can't end, must roll dice first")
-        elif choice == "roll_dice":
-            if self.can_roll:
-                print("Already rolled dice")
-            else:
-                self.can_roll = True
-                self.can_end = False
-                return choice
+    # def pay_bail(self):
+    #     if self.money < 50:
+    #         print("Not enough money for bail.")
+    #         return False
 
-    def pay_bail(self):
-        if money < 50:
-            print("No money for bail")
+    #     choice = ""
+
+    #     while choice not in ("yes", "no"):
+    #         choice = input("Pay bail? (yes/no): ").strip().lower()
+
+    #     if choice == "yes":
+    #         self.money -= 50
+    #         self.in_prison = 0
+    #         return True
+
+    #     return False
+
+    def buy_property(self, tile):
+        if tile.owner is not None:
             return False
-        choice = ""
-        while not choice or choice not in ("yes", "no"):
-            choice = input("Pay bail? (yes/no): ").strip().lower()
-            if choice not in ("yes", "no"):
-                print(f"Choice {choice} must be 'yes' or 'no'")
-        if choice == "yes":
-            money -= 50
-            self.in_prison = 0
-        return True if choice == "yes" else False
 
-    def buy_property(self, property):
-        self.money -= property.price
-        self.owned_properties.append(property)
-        if type(property) == Cities:
-            self.owned_cities.append(property)
-        elif type(property) == Airport:
-            self.owned_airport.append(property)
-        elif type(property) == UtilityProperty:
-            self.owned_utitilities.append(property)
+        if self.money < tile.price:
+            print("Not enough money to buy this property.")
+            return False
+
+        self.money -= tile.price
+        tile.owner = self
+        self.owned_properties.append(tile)
+
+        if isinstance(tile, Cities):
+            self.owned_cities.append(tile)
+
+        elif isinstance(tile, Airport):
+            self.owned_airport.append(tile)
+
+        elif isinstance(tile, UtilityProperty):
+            self.owned_utilities.append(tile)
+
+        return True
 
     def get_taxed(self, amount):
         self.money -= amount

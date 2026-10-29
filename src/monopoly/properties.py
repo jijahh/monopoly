@@ -47,7 +47,7 @@ property_rent = {
     "Frankfurt": [14, 70, 190, 540, 760, 950],
     "Munich": [15, 70, 210, 560, 760, 960],
     "Berlin": [15, 80, 220, 600, 780, 1000],
-    "Shenzen": [18, 90, 240, 680, 850, 1000],
+    "Shenzhen": [18, 90, 240, 680, 850, 1000],
     "Beijing": [20, 90, 260, 710, 900, 1000],
     "Shanghai": [20, 100, 290, 740, 920, 1100],
     "CDG Airport": [25, 50, 100, 200],
@@ -62,7 +62,10 @@ property_rent = {
     "San Francisco": [35, 180, 550, 1150, 1350, 1525],
     "New York": [50, 200, 600, 1400, 1700, 2000],
 }
-tax_amount = {"Earnings Tax": lambda x: math.floor(x * 0.10), "Premium Tax": 75}
+tax_amount = {
+    "Earnings Tax": lambda player: math.floor(player.money * 0.10),
+    "Premium Tax": lambda player: 75,
+}
 
 board = [
     "Start",
@@ -144,25 +147,26 @@ utilities = {"Power Company", "Water Company"}
 airports = {"TLV Airport", "MUC Airport", "CDG Airport", "JFK Airport"}
 taxes = {"Earnings Tax", "Premium Tax"}
 special_tiles = {"Prison", "Vacation", "Go To Prison", "Start"}
-treasure_cards = {
-    "Happy holidays - receive 20"
-    "From trading stocks you earned $50."
-    "You received $100 from your sibling."
-    "Advance to Start."
-    "Go to prison."
-    "From gift cards you get $100."
-    "You found a wallet containing some cash. Collect $200."
-    "You have won third prize in a lottery. Collect $15."
-    "It's time to renovate your properties. Pay $30 per house and $120 per hotel you own."
-    "Beneficial business decisions. You made a profit of $25."
-    "Tax refund. Collect $100."
-    "Your phone died. Pay $50 for a repair"
-    "Got a Pardon card from the treasures stack"
-    "You host a party. Collect $50 from every player for equipment."
-    "Your car has ran out of gas. Pay $50."
-    "Happy birthday! Collect $10 from every player."
-    "Car rental insurance. Pay $60 "
-}
+
+treasure_cards = [
+    "Happy holidays - receive 20",
+    "From trading stocks you earned $50.",
+    "You received $100 from your sibling.",
+    "Advance to Start.",
+    "Go to prison.",
+    "From gift cards you get $100.",
+    "You found a wallet containing some cash. Collect $200.",
+    "You have won third prize in a lottery. Collect $15.",
+    "It's time to renovate your properties. Pay $30 per house and $120 per hotel you own.",
+    "Beneficial business decisions. You made a profit of $25.",
+    "Tax refund. Collect $100.",
+    "Your phone died. Pay $50 for a repair",
+    "Got a Pardon card from the treasures stack",
+    "You host a party. Collect $50 from every player for equipment.",
+    "Your car has ran out of gas. Pay $50.",
+    "Happy birthday! Collect $10 from every player.",
+    "Car rental insurance. Pay $60 ",
+]
 easy_treasure = {
     "Happy holidays - receive 20": 20,
     "From trading stocks you earned $50.": 50,
@@ -198,21 +202,40 @@ class Property(Tile):
         self.price = price
         self.houses = 0
 
+    def calculate_rent(self, game):
+        rents = property_rent[self.name]
+
+        if isinstance(self, UtilityProperty):
+            utilities_owned = sum(
+                isinstance(p, UtilityProperty) for p in self.owner.owned_properties
+            )
+
+            rent_function = rents[min(utilities_owned - 1, len(rents) - 1)]
+
+            return rent_function(sum(game.last_roll))
+
+        if isinstance(self, Airport):
+            airports_owned = sum(
+                isinstance(p, Airport) for p in self.owner.owned_properties
+            )
+
+            return rents[min(airports_owned - 1, len(rents) - 1)]
+
+        # Cities: the rent table represents base rent,
+        # increasing house levels and the hotel level.
+        return rents[min(self.houses, len(rents) - 1)]
+
     def buy_property(self, player):
         pass
 
     def land_on(self, player, game):
-        choice = ""
-        if self.owner == None:
-            choice = input("Buy property? (yes, no)")
-            if choice == "yes":
-                if player.money > self.price:
-                    self.owner = player
-                    player.buy_property(self)
-        elif self.owner == player:
-            pass
-        else:
-            rent = property_rent[self.name][0]
+        """Resolve landing without terminal input so the WebSocket layer can decide."""
+        if self.owner is None:
+            # The client must explicitly send BUY_PROPERTY or DECLINE_PROPERTY.
+            if player.money >= self.price:
+                game.pending_purchase = {"player_name": player.name, "tile": self}
+        elif self.owner is not player:
+            rent = self.calculate_rent(game)
             player.get_taxed(rent)
             self.owner.get_paid(rent)
 
@@ -224,39 +247,37 @@ class Cities(Property):
 
 
 class Airport(Property):
-    def __init__(self, name, price):
-        super().__init__(name, price)
+    pass
 
 
 class UtilityProperty(Property):
-    def __init__(self, name, price):
-        super().__init__(name, price)
+    pass
 
 
 class Tax(Tile):
-    def __init__(self, name):
-        super().__init__(name)
-
     def land_on(self, player, game):
-        amount = tax_amount[self.name]
+        amount = tax_amount[self.name](player)
+        print(f"{player.name} pays ${amount} in tax.")
         player.get_taxed(amount)
 
 
 class Treasure(Tile):
-    def __init__(self, name):
-        super().__init__(name)
-
     def land_on(self, player, game):
         card = random.choice(treasure_cards)
+        print(card)
+
         if card in easy_treasure:
-            player.get_easy_treasure(easy_treasure[card])
-        elif card:
-            pass
+            amount = easy_treasure[card]
+
+            if amount >= 0:
+                player.get_paid(amount)
+            else:
+                player.get_taxed(-amount)
 
 
 class Surprise(Tile):
-    def __init__(self, name):
-        super().__init__(name)
+    def land_on(self, player, game):
+        print("Surprise cards are not implemented yet.")
 
 
 class Unique(Tile):
@@ -265,35 +286,42 @@ class Unique(Tile):
 
     def land_on(self, player, game):
         if self.name == "Start":
-            player.get_easy_treasure(300)
+            pass
         elif self.name == "Prison":
             pass
         elif self.name == "Vacation":
             player.on_vacation += 2
             return
         elif self.name == "Go To Prison":
-            player.position = board.index("Go To Prison")
+            player.position = board.index("Prison")
             player.in_prison += 3
 
 
 class Board:
     def __init__(self):
-        board_list = []
-        for tile in board:
-            if tile in city_mapping:
-                board_list.append(
-                    Cities(tile, property_prices[tile], city_mapping[tile])
-                )
-            elif tile in airports:
-                board_list.append(Airport(tile, property_prices[tile]))
-            elif tile in utilities:
-                board_list.append(UtilityProperty(tile, property_prices[tile]))
-            elif tile in taxes:
-                board_list.append(Tax(tile))
-            else:
-                board_list.append(Unique(tile))
-        self.board = board_list
+        self.board = [self.create_tile(name) for name in board]
 
-    def draw(self):
-        for tile in self.board:
-            print(tile)
+    def create_tile(self, name):
+        if name in city_mapping:
+            return Cities(
+                name,
+                property_prices[name],
+                city_mapping[name],
+            )
+
+        if name in airports:
+            return Airport(name, property_prices[name])
+
+        if name in utilities:
+            return UtilityProperty(name, property_prices[name])
+
+        if name in taxes:
+            return Tax(name)
+
+        if name == "Treasure":
+            return Treasure(name)
+
+        if name == "Surprise":
+            return Surprise(name)
+
+        return Unique(name)
