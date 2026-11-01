@@ -38,7 +38,8 @@ class RoomManager:
 
     async def connect(self, room_id: str, name: str, websocket: WebSocket):
         room = self.get_room(room_id)
-        if room is None:
+        if not room:
+            print(f"[CONNECT] Room not found: {room_id}")
             raise ValueError("Room does not exist.")
 
         name = name.strip()
@@ -49,6 +50,10 @@ class RoomManager:
         if room.status == "playing":
             for client in room.connections.values():
                 if client.name.casefold() == name.casefold():
+                    print(
+                        f"[CONNECT] Existing player: {client.name}, "
+                        f"websocket is None: {client.websocket is None}"
+                    )
                     if client.websocket is not None:
                         raise ValueError("That player name is already connected.")
                     await websocket.accept()
@@ -71,20 +76,33 @@ class RoomManager:
             room.host_player_id = player_id
         return player_id, role
 
-    def disconnect(self, room_id: str, player_id: str):
+    def disconnect(self, room_id: str, player_id: str, websocket):
         room = self.get_room(room_id)
-        if room is None:
+        if not room:
+            print(f"[DISCONNECT] Room not found: {room_id}")
             return
         client = room.connections.get(player_id)
-        if client is None:
+        if not client:
+            print(f"[DISCONNECT] Player not found: {player_id}")
+            return
+
+        print(f"[DISCONNECT] Player: {client.name}")
+        print(f"[DISCONNECT] Room status: {room.status}")
+        print(f"[DISCONNECT] Same websocket: {client.websocket is websocket}")
+        print(f"[DISCONNECT] Websocket reference: {client.websocket}")
+
+        if client.websocket is not websocket:
+            print("[DISCONNECT] Skipping cleanup: websocket mismatch")
             return
 
         if room.status == "playing":
             # Keep the player in the game so they can reconnect by the same name.
             client.websocket = None
-            return
+            print("[DISCONNECT] Player retained; websocket cleared")
 
-        room.connections.pop(player_id, None)
+        else:
+            room.connections.pop(player_id, None)
+            print("[DISCONNECT] Player removed")
         if room.host_player_id == player_id:
             room.host_player_id = None
             for remaining in room.connections.values():

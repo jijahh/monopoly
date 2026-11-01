@@ -1,6 +1,7 @@
 from typing import Optional
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ValidationError
+import json
 from .connection import room_manager
 from .main_game import Game
 
@@ -53,7 +54,15 @@ async def game_websocket_endpoint(
 
     try:
         while True:
-            raw_data = await websocket.receive_json()
+            try:
+                raw_data = await websocket.receive_json()
+            except json.JSONDecodeError:
+                await send_error(
+                    websocket, "Malformed JSON. Please send a valid JSON object"
+                )
+                continue
+            except WebSocketDisconnect:
+                break
             try:
                 packet = GameAction(**raw_data)
             except (ValidationError, TypeError) as exc:
@@ -112,7 +121,7 @@ async def game_websocket_endpoint(
     except WebSocketDisconnect:
         pass
     finally:
-        room_manager.disconnect(room_id, player_id)
+        room_manager.disconnect(room_id, player_id, websocket)
         await room_manager.broadcast_to_room(
             room_id,
             {
