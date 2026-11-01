@@ -1,6 +1,6 @@
 import random
 from monopoly.player import Player
-from monopoly.properties import Board, Property
+from monopoly.properties import Airport, Board, Cities, Property, UtilityProperty
 
 
 class Game:
@@ -112,13 +112,23 @@ class Game:
             return events
 
         if action == "FORFEIT":
+            previous_player = player.name
+
             self.players.pop(self.player_to_play)
+            self.pending_purchase = None
+
             event = self.check_winner()
+
             if event:
                 events.append(event)
+                events.append(self._state_event())
                 return events
-            previous_player = player.name
+
+            # The player after the forfeiting player should take the turn.
+            self.player_to_play = (self.player_to_play - 1) % len(self.players)
+
             skipped = self._advance_to_next_active_player()
+
             events.append(
                 {
                     "type": "TURN_CHANGED",
@@ -127,8 +137,10 @@ class Game:
                     "skipped_players": skipped,
                 }
             )
+
             events.append(self._state_event())
             return events
+
         if action == "END_TURN":
             if not player.has_rolled:
                 raise ValueError("You must roll before ending your turn.")
@@ -161,10 +173,13 @@ class Game:
                 "winner": self.winner.name,
                 "message": f"{self.winner.name} wins the game!",
             }
+
             if reason:
                 event["reason"] = reason
-            self._pending_events.append(event)
-        return self.winner
+
+            return event
+
+        return None
 
     def _advance_to_next_active_player(self):
         """Advance turn and apply the engine's existing skip-turn counters."""
@@ -206,6 +221,9 @@ class Game:
                     "in_prison": player.in_prison,
                     "on_vacation": player.on_vacation,
                     "has_rolled": player.has_rolled,
+                    "houses": player.houses,
+                    "hotels": player.hotels,
+                    "pardons": player.pardons,
                 }
             )
 
@@ -246,3 +264,104 @@ class Game:
             "board": board,
             "pending_purchase": pending,
         }
+
+    @classmethod
+    def from_dict(cls, data):
+        """Reconstruct a Game instance from its serialized state."""
+
+        game = cls.__new__(cls)
+        game.board = Board()
+        game.players = []
+
+        # Restore players first.
+        for player_data in data["players"]:
+            player = Player(
+                name=player_data["name"],
+                player_no=player_data["player_no"],
+                money=player_data["money"],
+            )
+
+            player.position = player_data.get("position", 0)
+            player.houses = player_data.get("houses", 0)
+            player.hotels = player_data.get("hotels", 0)
+            player.in_prison = player_data.get("in_prison", 0)
+            player.on_vacation = player_data.get("on_vacation", 0)
+            player.pardons = player_data.get("pardons", 0)
+            player.has_rolled = player_data.get("has_rolled", False)
+
+            game.players.append(player)
+
+        players_by_name = {player.name: player for player in game.players}
+
+        # Restore property ownership and house levels.
+        for tile_data in data["board"]:
+            index = tile_data["index"]
+            tile = game.board.board[index]
+
+            if tile.name != tile_data["name"]:
+                raise ValueError(
+                    f"Board mismatch at index {index}: "
+                    f"expected {tile.name}, got {tile_data['name']}"
+                )
+
+            if not isinstance(tile, Property):
+                continue
+
+            tile.houses = tile_data.get("houses", 0)
+
+            owner_name = tile_data.get("owner")
+            if owner_name is None:
+                continue
+
+            owner = players_by_name.get(owner_name)
+            if owner is None:
+                raise ValueError(f"Unknown property owner: {owner_name}")
+
+            tile.owner = owner
+            owner.owned_properties.append(tile)
+
+            if isinstance(tile, Cities):
+                owner.owned_cities.append(tile)
+            elif isinstance(tile, Airport):
+                owner.owned_airport.append(tile)
+            elif isinstance(tile, UtilityProperty):
+                owner.owned_utilities.append(tile)
+
+        # Restore the current player.
+        current_player_name = data.get("current_player")
+        game.player_to_play = next(
+            (
+                index
+                for index, player in enumerate(game.players)
+                if player.name == current_player_name
+            ),
+            0,
+        )
+
+        # Restore the remaining game state.
+        game.winner = players_by_name.get(data.get("winner"))
+        game.last_roll = tuple(data.get("last_roll", [0, 0]))
+        game.pending_purchase = None
+
+        pending_data = data.get("pending_purchase")
+        if pending_data:
+            pending_tile = next(
+                (
+                    tile
+                    for tile in game.board.board
+                    if tile.name == pending_data["property"]
+                ),
+                None,
+            )
+
+            if pending_tile is None:
+                raise ValueError(
+                    f"Unknown pending property: {pending_data['property']}"
+                )
+
+            game.pending_purchase = {
+                "player_name": pending_data["player_name"],
+                "tile": pending_tile,
+            }
+
+        return game

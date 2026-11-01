@@ -1,9 +1,10 @@
 from typing import Optional
+import json
+
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ValidationError
-import json
+
 from .connection import room_manager
-from .main_game import Game
 
 
 class GameAction(BaseModel):
@@ -15,7 +16,12 @@ router = APIRouter(tags=["WebSocket"])
 
 
 async def send_error(websocket: WebSocket, message: str):
-    await websocket.send_json({"type": "ERROR", "message": message})
+    await websocket.send_json(
+        {
+            "type": "ERROR",
+            "message": message,
+        }
+    )
 
 
 @router.websocket("/ws/{room_id}")
@@ -24,109 +30,136 @@ async def game_websocket_endpoint(
     room_id: str,
     name: str = Query(...),
 ):
+    player_id = None
+    player_name = None
+    token = None
+
     try:
-        player_id, role = await room_manager.connect(room_id, name, websocket)
+        (
+            player_id,
+            role,
+            player_name,
+            token,
+            room_status,
+        ) = await room_manager.connect(
+            room_id,
+            name,
+            websocket,
+        )
+
     except ValueError as exc:
         await websocket.close(code=1008, reason=str(exc))
         return
 
-    room = room_manager.get_room(room_id)
-    client = room.connections[player_id]
-    await websocket.send_json(
-        {
-            "type": "WELCOME",
-            "room_id": room_id,
-            "player_id": player_id,
-            "player_name": client.name,
-            "role": role,
-            "status": room.status,
-        }
-    )
-    await room_manager.broadcast_to_room(
-        room_id,
-        {
-            "type": "PLAYER_JOINED",
-            "player_id": player_id,
-            "player_name": client.name,
-            "role": role,
-        },
-    )
+    except Exception as exc:
+        print(f"[CONNECT] Unexpected error: {exc}")
+        await websocket.close(
+            code=1011,
+            reason="Could not connect to the game server.",
+        )
+        return
 
     try:
+        await websocket.send_json(
+            {
+                "type": "WELCOME",
+                "room_id": room_id,
+                "player_id": player_id,
+                "player_name": player_name,
+                "role": role,
+                "status": room_status,
+            }
+        )
+
+        await room_manager.broadcast_to_room(
+            room_id,
+            {
+                "type": "PLAYER_JOINED",
+                "player_id": player_id,
+                "player_name": player_name,
+                "role": role,
+            },
+        )
+
         while True:
             try:
                 raw_data = await websocket.receive_json()
+
             except json.JSONDecodeError:
                 await send_error(
-                    websocket, "Malformed JSON. Please send a valid JSON object"
+                    websocket,
+                    "Malformed JSON. Please send a valid JSON object.",
                 )
                 continue
+
             except WebSocketDisconnect:
                 break
+
             try:
                 packet = GameAction(**raw_data)
+
             except (ValidationError, TypeError) as exc:
-                await send_error(websocket, f"Invalid action message: {exc}")
-                continue
-
-            # Re-fetch shared room/client state on each message.
-            room = room_manager.get_room(room_id)
-            if room is None or player_id not in room.connections:
-                await send_error(websocket, "This room is no longer available.")
-                break
-            client = room.connections[player_id]
-            action = packet.action.strip().upper()
-
-            if action == "START_GAME":
-                if client.role != "host":
-                    await send_error(websocket, "Only the host can start the game.")
-                    continue
-                if room.status != "waiting":
-                    await send_error(websocket, "The game has already started.")
-                    continue
-                names = [c.name for c in room.connections.values()]
-                if len(names) < 2:
-                    await send_error(
-                        websocket, "At least two players must join before starting."
-                    )
-                    continue
-                try:
-                    room.game = Game(names)
-                except ValueError as exc:
-                    await send_error(websocket, str(exc))
-                    continue
-                room.status = "playing"
-                await room_manager.broadcast_to_room(
-                    room_id,
-                    {
-                        "type": "GAME_STARTED",
-                        "state": room.game.to_dict(),
-                    },
+                await send_error(
+                    websocket,
+                    f"Invalid action message: {exc}",
                 )
                 continue
 
-            if room.status != "playing" or room.game is None:
-                await send_error(websocket, "The host must start the game first.")
-                continue
-
             try:
-                events = room.game.handle_action(client.name, action, packet.data)
+                events = await room_manager.handle_action(
+                    room_id=room_id,
+                    player_id=player_id,
+                    token=token,
+                    action=packet.action,
+                    data=packet.data,
+                )
+
+                for event in events:
+                    await room_manager.broadcast_to_room(
+                        room_id,
+                        event,
+                    )
+
             except ValueError as exc:
                 await send_error(websocket, str(exc))
                 continue
 
-            for event in events:
-                await room_manager.broadcast_to_room(room_id, event)
+            except Exception as exc:
+                print(f"[GAME ACTION] Unexpected error: {exc}")
+
+                await send_error(
+                    websocket,
+                    "An internal server error occurred while "
+                    "processing your action.",
+                )
+                continue
 
     except WebSocketDisconnect:
         pass
+
+    except Exception as exc:
+        print(f"[WEBSOCKET] Error for {player_name}: {exc}")
+
     finally:
-        room_manager.disconnect(room_id, player_id, websocket)
-        await room_manager.broadcast_to_room(
-            room_id,
-            {
-                "type": "PLAYER_LEFT",
-                "player_id": player_id,
-                "player_name": client.name,
-            },
-        )
+        try:
+            disconnected = await room_manager.disconnect(
+                room_id,
+                player_id,
+                token,
+                websocket,
+            )
+
+            # Only broadcast PLAYER_LEFT if this exact connection
+            # successfully changed the room's connection state.
+            if disconnected:
+                await room_manager.broadcast_to_room(
+                    room_id,
+                    {
+                        "type": "PLAYER_LEFT",
+                        "player_id": player_id,
+                        "player_name": player_name,
+                    },
+                )
+
+        except Exception as exc:
+            print(f"[DISCONNECT] Cleanup failed for {player_name}: {exc}")
